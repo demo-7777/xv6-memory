@@ -1,0 +1,276 @@
+diff -ruN xv6-project2/defs.h xv6-project3/defs.h
+--- xv6-project2/defs.h	2026-02-22 17:01:45.123833063 -0500
++++ xv6-project3/defs.h	2026-03-16 20:22:24.095604369 -0400
+@@ -186,7 +186,7 @@
+ void            freevm(pde_t*);
+ void            inituvm(pde_t*, char*, uint);
+ int             loaduvm(pde_t*, char*, struct inode*, uint, uint);
+-pde_t*          copyuvm(pde_t*, uint);
++pde_t*          copyuvm(pde_t*, uint, int);
+ void            switchuvm(struct proc*);
+ void            switchkvm(void);
+ int             copyout(pde_t*, uint, void*, uint);
+diff -ruN xv6-project2/exec.c xv6-project3/exec.c
+--- xv6-project2/exec.c	2026-02-21 17:38:04.569453846 -0500
++++ xv6-project3/exec.c	2026-03-17 15:08:09.389856845 -0400
+@@ -62,11 +62,20 @@
+ 
+   // Allocate two pages at the next page boundary.
+   // Make the first inaccessible.  Use the second as the user stack.
++  /*
+   sz = PGROUNDUP(sz);
+   if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0)
+     goto bad;
+   clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
+   sp = sz;
++  */
++
++  // MODIFIED ALLOCATION
++  // stack starts just below KERNBASE and grows downward
++  sz = PGROUNDUP(sz);
++  if(allocuvm(pgdir,KERNBASE-PGSIZE,KERNBASE-1)==0) goto bad;
++  sp = KERNBASE;
++  curproc->stackpages = 1;
+ 
+   // Push argument strings, prepare rest of stack in ustack.
+   for(argc = 0; argv[argc]; argc++) {
+diff -ruN xv6-project2/Makefile xv6-project3/Makefile
+--- xv6-project2/Makefile	2026-02-21 17:49:36.330507156 -0500
++++ xv6-project3/Makefile	2026-03-17 16:38:29.236079266 -0400
+@@ -184,6 +184,7 @@
+ 	_zombie\
+     _syscallTest\
+     _lotterytest\
++    _stacktester\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+diff -ruN xv6-project2/proc.c xv6-project3/proc.c
+--- xv6-project2/proc.c	2026-02-22 18:05:08.896465049 -0500
++++ xv6-project3/proc.c	2026-03-17 15:07:35.913685226 -0400
+@@ -138,13 +138,17 @@
+     panic("userinit: out of memory?");
+   inituvm(p->pgdir, _binary_initcode_start, (int)_binary_initcode_size);
+   p->sz = PGSIZE;
++  if(allocuvm(p->pgdir, KERNBASE-PGSIZE, KERNBASE-1)==0)
++    panic("userinit: out of memory?");
++  p->stackpages = 1;
+   memset(p->tf, 0, sizeof(*p->tf));
+   p->tf->cs = (SEG_UCODE << 3) | DPL_USER;
+   p->tf->ds = (SEG_UDATA << 3) | DPL_USER;
+   p->tf->es = p->tf->ds;
+   p->tf->ss = p->tf->ds;
+   p->tf->eflags = FL_IF;
+-  p->tf->esp = PGSIZE;
++  // p->tf->esp = PGSIZE;
++  p->tf->esp = KERNBASE;
+   p->tf->eip = 0;  // beginning of initcode.S
+ 
+   safestrcpy(p->name, "initcode", sizeof(p->name));
+@@ -198,7 +202,12 @@
+   }
+ 
+   // Copy process state from proc.
+-  if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
++  //if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){ // old
++
++  np->sz = curproc->sz;
++  np->stackpages = curproc->stackpages;
++
++  if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz, curproc->stackpages)) == 0) {
+     kfree(np->kstack);
+     np->kstack = 0;
+     np->state = UNUSED;
+diff -ruN xv6-project2/proc.h xv6-project3/proc.h
+--- xv6-project2/proc.h	2026-02-21 18:34:18.868477197 -0500
++++ xv6-project3/proc.h	2026-03-16 18:01:11.440179327 -0400
+@@ -53,6 +53,9 @@
+   // project 2: tickets/ticks
+   int tickets;
+   int ticks;
++
++  // project 3: stackpages
++  int stackpages;
+ };
+ 
+ // Process memory is laid out contiguously, low addresses first:
+diff -ruN xv6-project2/stacktester.c xv6-project3/stacktester.c
+--- xv6-project2/stacktester.c	1969-12-31 19:00:00.000000000 -0500
++++ xv6-project3/stacktester.c	2026-03-16 20:45:13.533200000 -0400
+@@ -0,0 +1,54 @@
++#include "types.h"
++#include "stat.h"
++#include "user.h"
++#include "fs.h"
++#include "memlayout.h"
++#include "mmu.h"
++
++int magic_num = 123456;
++
++// this address is stored in data/text section 
++int* stack_ptr = (int*) KERNBASE - 4; 
++
++int
++main(int argc, char *argv[])
++{
++  // create two integers, one in stack, another in heap
++  int stack_val = magic_num;
++  int* heap_ptr = malloc(sizeof(int));
++  printf(1, "addr of stack_val: %x\n", &stack_val);
++  printf(1, "addr of heap_ptr: %x\n", heap_ptr);
++
++  // compare the addresses of the two integers
++  // test will pass if stack_val has higher address
++  if(heap_ptr < &stack_val){
++    printf(1, "TEST 1 PASSED\n");
++  } else {
++    exit();
++  }
++
++  // initialize somewhere in the end of user memory(i.e., stack)
++  *stack_ptr = magic_num;
++
++  // create a chile with the same address space
++  int rc = fork();
++  if(rc == 0){
++    // test would pass only if the stack is properly copied
++    // if not, the kernel traps
++    if(*stack_ptr == magic_num){
++      printf(1, "TEST 2 PASSED\n");
++    } 
++  } else if (rc > 0) {
++    (void) wait();
++    // grow the stack by accessing a address 
++    // in the page right below the initial stack page
++    char *p = (char*) (KERNBASE - PGSIZE - 4);
++    *p = 'z';
++
++    // test would pass if no trap happened
++    printf(1, "TEST 3 PASSED\n");
++  } else {
++    printf(1, "fork failed!\n");
++  }
++  exit();
++}
+diff -ruN xv6-project2/syscall.c xv6-project3/syscall.c
+--- xv6-project2/syscall.c	2026-02-21 18:10:47.312955226 -0500
++++ xv6-project3/syscall.c	2026-03-17 14:32:05.674336421 -0400
+@@ -19,7 +19,10 @@
+ {
+   struct proc *curproc = myproc();
+ 
+-  if(addr >= curproc->sz || addr+4 > curproc->sz)
++  //if(addr >= curproc->sz || addr+4 > curproc->sz) // old check
++  uint stackbottom = KERNBASE-curproc->stackpages*PGSIZE;
++  if (!((addr<curproc->sz && addr+4<=curproc->sz) ||
++        (addr>=stackbottom && addr+4<=KERNBASE)))
+     return -1;
+   *ip = *(int*)(addr);
+   return 0;
+@@ -34,10 +37,18 @@
+   char *s, *ep;
+   struct proc *curproc = myproc();
+ 
+-  if(addr >= curproc->sz)
+-    return -1;
+-  *pp = (char*)addr;
+-  ep = (char*)curproc->sz;
++  // if(addr >= curproc->sz) // old check
++  uint stackbottom = KERNBASE-curproc->stackpages*PGSIZE;
++  if(addr<curproc->sz){
++    *pp = (char*)addr;
++    ep = (char*)curproc->sz;
++  }
++  else if(addr>=stackbottom && addr<KERNBASE){
++    *pp = (char*)addr;
++    ep = (char*)KERNBASE;
++  }
++  else return -1;
++
+   for(s = *pp; s < ep; s++){
+     if(*s == 0)
+       return s - *pp;
+@@ -63,8 +74,12 @@
+  
+   if(argint(n, &i) < 0)
+     return -1;
+-  if(size < 0 || (uint)i >= curproc->sz || (uint)i+size > curproc->sz)
+-    return -1;
++  // if(size < 0 || (uint)i >= curproc->sz || (uint)i+size > curproc->sz) // old check
++  uint stackbottom = KERNBASE-curproc->stackpages*PGSIZE;
++  if (size<0 ||
++     !(((uint)i<curproc->sz && (uint)i+size<=curproc->sz) ||
++       ((uint)i>=stackbottom && (uint)i+size<=KERNBASE)))
++    return -1; // checks heap or stack
+   *pp = (char*)i;
+   return 0;
+ }
+diff -ruN xv6-project2/trap.c xv6-project3/trap.c
+--- xv6-project2/trap.c	2026-02-21 17:38:04.677454135 -0500
++++ xv6-project3/trap.c	2026-03-17 15:35:27.423912982 -0400
+@@ -77,7 +77,28 @@
+             cpuid(), tf->cs, tf->eip);
+     lapiceoi();
+     break;
+-
++  
++  case T_PGFLT: { // project 3: todo 5
++    uint addr;
++    struct proc *p;
++    uint stackbottom;
++    
++    addr = rcr2();
++    p = myproc();
++    stackbottom = KERNBASE - p->stackpages*PGSIZE;
++    
++    if(addr>=stackbottom-PGSIZE && addr<stackbottom){
++      if(allocuvm(p->pgdir, stackbottom-PGSIZE, stackbottom-1)==0)
++        panic("stack growth failed");
++      p->stackpages++;
++      break;
++    }
++    cprintf("pid %d %s: trap %d err %d on cpu %d eip 0x%x addr 0x%x--kill proc\n",
++            p->pid, p->name, tf->trapno, tf->err, cpuid(), tf->eip, addr);
++    p->killed=1;
++    break;
++  }
++  
+   //PAGEBREAK: 13
+   default:
+     if(myproc() == 0 || (tf->cs&3) == 0){
+diff -ruN xv6-project2/vm.c xv6-project3/vm.c
+--- xv6-project2/vm.c	2026-02-21 17:38:04.697454189 -0500
++++ xv6-project3/vm.c	2026-03-16 20:28:49.690512892 -0400
+@@ -313,7 +313,7 @@
+ // Given a parent process's page table, create a copy
+ // of it for a child.
+ pde_t*
+-copyuvm(pde_t *pgdir, uint sz)
++copyuvm(pde_t *pgdir, uint sz, int stackpages)
+ {
+   pde_t *d;
+   pte_t *pte;
+@@ -337,6 +337,23 @@
+       goto bad;
+     }
+   }
++
++  for(i=KERNBASE-stackpages*PGSIZE;i<KERNBASE;i+=PGSIZE) {
++    if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
++      panic("copyuvm: pte should exist");
++    if(!(*pte & PTE_P))
++      panic("copyuvm: page not present");
++    pa = PTE_ADDR(*pte);
++    flags = PTE_FLAGS(*pte);
++    if((mem = kalloc()) == 0)
++      goto bad;
++    memmove(mem, (char*)P2V(pa), PGSIZE);
++    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
++      kfree(mem);
++      goto bad;
++    }
++  }
++
+   return d;
+ 
+ bad:
